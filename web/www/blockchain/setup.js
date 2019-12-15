@@ -85,11 +85,6 @@ function getAdminOrgs() {
     console.log(e);
     process.exit(-1);
   }
-  // Setup event hubs
-  insuranceClient.initEventHubs();
-  shopClient.initEventHubs();
-  repairShopClient.initEventHubs();
-  policeClient.initEventHubs();
 
   // Bootstrap blockchain network
   try {
@@ -117,6 +112,19 @@ function getAdminOrgs() {
     console.log('Fatal error bootstrapping the blockchain network!');
     console.log(e);
     process.exit(-1);
+  }
+
+  // Register block events
+  try {
+    console.log('Connecting and Registering Block Events');
+    insuranceClient.connectAndRegisterBlockEvent();
+    shopClient.connectAndRegisterBlockEvent();
+    repairShopClient.connectAndRegisterBlockEvent();
+    policeClient.connectAndRegisterBlockEvent();
+  } catch (e) {
+  console.log('Fatal error register block event!');
+  console.log(e);
+  process.exit(-1);
   }
 
   // Initialize network
@@ -162,7 +170,7 @@ function getAdminOrgs() {
       const socketPath = process.env.DOCKER_SOCKET_PATH ||
       (process.platform === 'win32' ? '//./pipe/docker_engine' : '/var/run/docker.sock');
       const ccenvImage = process.env.DOCKER_CCENV_IMAGE ||
-        'hyperledger/fabric-ccenv:x86_64-1.1.0';
+        'hyperledger/fabric-ccenv:latest';
       const listOpts = { socketPath, method: 'GET', path: '/images/json' };
       const pullOpts = {
         socketPath, method: 'POST',

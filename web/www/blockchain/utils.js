@@ -5,6 +5,8 @@ import {
 } from 'path';
 import EventEmitter from 'events';
 
+import config from './config';
+
 import {
   load as loadProto
 } from 'grpc';
@@ -13,7 +15,7 @@ import hfc from 'fabric-client';
 import utils from 'fabric-client/lib/utils';
 import Orderer from 'fabric-client/lib/Orderer';
 import Peer from 'fabric-client/lib/Peer';
-import EventHub from 'fabric-client/lib/EventHub';
+import ChannelEventHub from 'fabric-client/lib/ChannelEventHub';
 import User from 'fabric-client/lib/User';
 import CAClient from 'fabric-ca-client';
 import {
@@ -46,14 +48,23 @@ export class OrganizationClient extends EventEmitter {
       pem: ordererConfig.pem,
       'ssl-target-name-override': ordererConfig.hostname
     });
+
     this._channel.addOrderer(orderer);
 
     const defaultPeer = this._client.newPeer(peerConfig.url, {
       pem: peerConfig.pem,
       'ssl-target-name-override': peerConfig.hostname
     });
+
     this._peers.push(defaultPeer);
     this._channel.addPeer(defaultPeer);
+    let defaultEventHub;
+    if (config.isUbuntu){
+      defaultEventHub = this._channel.newChannelEventHub(defaultPeer);
+    } else {
+      defaultEventHub = this._channel.newChannelEventHub(this.defaultPeer);
+    }
+    this._eventHubs.push(defaultEventHub);
     this._adminUser = null;
   }
 
@@ -71,22 +82,20 @@ export class OrganizationClient extends EventEmitter {
     }
   }
 
-  initEventHubs() {
-    // Setup event hubs
+  connectAndRegisterBlockEvent() {
+    // Setup event hubs 
     try {
-      const defaultEventHub = this._client.newEventHub();
-      defaultEventHub.setPeerAddr(this._peerConfig.eventHubUrl, {
-        pem: this._peerConfig.pem,
-        'ssl-target-name-override': this._peerConfig.hostname
-      });
-      defaultEventHub.connect();
-      defaultEventHub.registerBlockEvent(
-        block => {
-          this.emit('block', unmarshalBlock(block));
-        });
-      this._eventHubs.push(defaultEventHub);
+      this._eventHubs[0].connect({full_block: true});
+      this._eventHubs[0].registerBlockEvent(
+          (block) => {
+             this.emit('block', unmarshalBlock(block));
+          },
+          (err) => {
+             console.log(err);
+          }
+      );
     } catch (e) {
-      console.log(`Failed to configure event hubs. Error ${e.message}`);
+      console.log(`Failed to connect and register block event. Error ${e.message}`);
       throw e;
     }
   }
@@ -141,36 +150,31 @@ export class OrganizationClient extends EventEmitter {
         txId: this._client.newTransactionID(),
         block: genesisBlock
       };
-      const joinedChannelPromises = this._eventHubs.map(eh => {
-        eh.connect();
+      await this._channel.joinChannel(request, JOIN_TIMEOUT);
+      // Check if Joined
+      this._eventHubs.map(eh => {
+        eh.connect({full_block: true});
         return new Promise((resolve, reject) => {
-          let blockRegistration;
-          const cb = block => {
-            clearTimeout(responseTimeout);
-            eh.unregisterBlockEvent(blockRegistration);
-            if (block.data.data.length === 1) {
-              const channelHeader =
-                block.data.data[0].payload.header.channel_header;
-              if (channelHeader.channel_id === this._channelName) {
-                resolve();
-              } else {
-                reject(new Error('Peer did not join an expected channel.'));
+          let blockRegistration = eh.registerBlockEvent(
+              (block) => {
+                eh.unregisterBlockEvent(blockRegistration);
+                if (block.data.data.length === 1 && block.data.data[0].payload.header.channel_header.channel_id === this._channelName) {
+                  console.log('Peer joined default channel');
+                  resolve();
+                } else {
+                  reject(new Error('Peer did not join an expected channel.'));
+                }
+              },
+              (err) => {
+                console.log(err);
               }
-            }
-          };
-
-          blockRegistration = eh.registerBlockEvent(cb);
+          );
           const responseTimeout = setTimeout(() => {
             eh.unregisterBlockEvent(blockRegistration);
             reject(new Error('Peer did not respond in a timely fashion!'));
           }, JOIN_TIMEOUT);
         });
       });
-
-      const completedPromise = joinedChannelPromises.concat([
-        this._channel.joinChannel(request)
-      ]);
-      await Promise.all(completedPromise);
     } catch (e) {
       console.log(`Error joining peer to channel. Error: ${e.message}`);
       throw e;
@@ -452,7 +456,7 @@ export function wrapError(message, innerError) {
   throw error;
 }
 
-function marshalArgs(args) {
+export function marshalArgs(args) {
   if (!args) {
     return args;
   }
